@@ -1,60 +1,67 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+//pinos do I2C
 #define pin_SDA 23
 #define pin_SCL 21
+#define mpu_addr  0x68 // endereço I2C do MPU6050
+#define reg_pwr_mgmt_1 0x6B //registrador de energia do 6050
+#define reg_accel_xout_h  0x3B //registrador que começa os dados do 6050
 
 //controlador do semaforo (chave do banheiro)
 SemaphoreHandle_t xMutexI2C = NULL;
 
-void Taski2c(void *pv){
+void Acordar6050(){
+  Wire.beginTransmission(mpu_addr);
+  Wire.write(reg_pwr_mgmt_1);
+  Wire.write(0x00);
+  Wire.endTransmission();
+  Serial.println("[6050] SENSOR ACORDADO!");
+}
+
+void TaskLeituraAcelerometro(void* pv){
   while (1)
   {
     /* code */
-    Serial.println("[SCANNER] Tentando obter chave do semáforo...");
+    if(xSemaphoreTake(xMutexI2C,pdMS_TO_TICKS(100))==pdTRUE){
+      Wire.beginTransmission(mpu_addr); //abre conexão com o 6050
+      Wire.write(reg_accel_xout_h);
+      Wire.endTransmission(false);// O 'false' envia um RESTART no barramento, mantendo a linha presa
 
-    if(xSemaphoreTake(xMutexI2C, pdMS_TO_TICKS(1000))==pdTRUE){
-      Serial.println("[SCANNER] Chave Obtida. Iniciando Varredura ...");
+      Wire.requestFrom(mpu_addr,6);
 
-      byte  erro,endereco;
-      int TotDispositivos = 0;
+      if(Wire.available() == 6){
+        int16_t rawX = (Wire.read()<<8 | Wire.read()); //a informação tem 16bit e o registrador le de 8, então se le 8, desloca pra esquerda e le os proximos 8 bits
+        int16_t rawY = (Wire.read()<<8 | Wire.read());
+        int16_t rawZ = (Wire.read()<<8 | Wire.read());
 
-      for(endereco = 1; endereco <127; endereco++){
-        Wire.beginTransmission(endereco);
-        erro = Wire.endTransmission();
-
-        if(erro == 0){
-          Serial.printf("[I2C] -> Dispositovo no endereço: 0x%02X\n", endereco);
-          TotDispositivos++;
-        }
-      }
-      if(TotDispositivos ==0){
-        Serial.println("[I2C] Nenhum dispositivo respondendo nos pinos.");
+        Serial.printf("[6050] X: %6d | Y: %6d | Z: %6d\n", rawX,rawY,rawZ);
       }
 
-      Serial.println("[SCANNER] Varredura concluída. Devolvendo chave...");
       xSemaphoreGive(xMutexI2C);
     }
     else{
-      Serial.println("Não consegui pegar a chave do semaforo");
+      Serial.println("[AVISO] task não consegui acesso a chave do banheiro");
     }
-    vTaskDelay(pdMS_TO_TICKS(10000));
+    vTaskDelay(pdMS_TO_TICKS(500));
   }  
 }
 
+
 void setup() { 
   Serial.begin(115200);
+  vTaskDelay(pdMS_TO_TICKS(5000));
 
-  vTaskDelay(pdMS_TO_TICKS(2000));
-  Serial.println("--- Inicializando Barramento I2C com Protecao FreeRTOS ---");
+  Serial.println("--- Inicializando Leitura MPU6050 via FreeRTOS ---");
+
   Wire.begin(pin_SDA,pin_SCL);
 
   xMutexI2C = xSemaphoreCreateMutex();
   if(xMutexI2C != NULL){
-    xTaskCreate(Taski2c, "i2c", 3072,NULL,1,NULL);
-  }
-  else{
-    Serial.println("Não consegui criar mutex");
+    Acordar6050();
+    xTaskCreate(TaskLeituraAcelerometro,"6050", 3072, NULL, 2, NULL);
+  }else {
+    Serial.println("Erro ao criar o Mutex!");
   }
 }
 

@@ -1,48 +1,61 @@
 #include <Arduino.h>
+#include <Wire.h>
 
-#define pin_tx  21
-#define pin_rx  18
+#define pin_SDA 23
+#define pin_SCL 21
 
-void Task_TX(void *pv){
-  int contador = 0;
-  char mensagem[32];
+//controlador do semaforo (chave do banheiro)
+SemaphoreHandle_t xMutexI2C = NULL;
 
+void Taski2c(void *pv){
   while (1)
   {
     /* code */
-    sprintf(mensagem, "pacote IoT numero: %d", contador++);
-    Serial.print("[TX] Enviando pela UART1: ");
-    Serial.println(mensagem);
+    Serial.println("[SCANNER] Tentando obter chave do semáforo...");
 
-    Serial1.println(mensagem);
-    vTaskDelay(3000/portTICK_PERIOD_MS);
-  }  
-}
+    if(xSemaphoreTake(xMutexI2C, pdMS_TO_TICKS(1000))==pdTRUE){
+      Serial.println("[SCANNER] Chave Obtida. Iniciando Varredura ...");
 
-void Task_RX(void *pv){
-  while (1)
-  {
-    if (Serial1.available() > 0)
-    {
-      Serial.print("[RX] -> Opa, chegou alguma coisa aqui ! Mensagem: ");
+      byte  erro,endereco;
+      int TotDispositivos = 0;
 
-      String msgRecebida = Serial1.readStringUntil('\n');
-      Serial.println(msgRecebida);
+      for(endereco = 1; endereco <127; endereco++){
+        Wire.beginTransmission(endereco);
+        erro = Wire.endTransmission();
+
+        if(erro == 0){
+          Serial.printf("[I2C] -> Dispositovo no endereço: 0x%02X\n", endereco);
+          TotDispositivos++;
+        }
+      }
+      if(TotDispositivos ==0){
+        Serial.println("[I2C] Nenhum dispositivo respondendo nos pinos.");
+      }
+
+      Serial.println("[SCANNER] Varredura concluída. Devolvendo chave...");
+      xSemaphoreGive(xMutexI2C);
     }
-    vTaskDelay(50/portTICK_PERIOD_MS);    
+    else{
+      Serial.println("Não consegui pegar a chave do semaforo");
+    }
+    vTaskDelay(pdMS_TO_TICKS(10000));
   }  
 }
 
 void setup() { 
   Serial.begin(115200);
-  vTaskDelay(5000/portTICK_PERIOD_MS);
 
-  Serial.println("--- Inicializando Teste de Loopback UART com FreeRTOS ---");
+  vTaskDelay(pdMS_TO_TICKS(2000));
+  Serial.println("--- Inicializando Barramento I2C com Protecao FreeRTOS ---");
+  Wire.begin(pin_SDA,pin_SCL);
 
-  Serial1.begin(115200, SERIAL_8N1, pin_rx, pin_tx);
-
-  xTaskCreate(Task_TX,"tx",2048,NULL,1,NULL);
-  xTaskCreate(Task_RX,"rx",2048, NULL,1,NULL);
+  xMutexI2C = xSemaphoreCreateMutex();
+  if(xMutexI2C != NULL){
+    xTaskCreate(Taski2c, "i2c", 3072,NULL,1,NULL);
+  }
+  else{
+    Serial.println("Não consegui criar mutex");
+  }
 }
 
 void loop() {

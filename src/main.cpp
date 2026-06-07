@@ -1,115 +1,84 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <PubSubClient.h> // A biblioteca mágica do MQTT
+#include <HTTPClient.h> // Biblioteca nativa do ESP32 para Web
 
-// Configurações de Rede e MQTT
+// Configurações do seu Wi-Fi
 const char* SSID = "NOME_DA_SUA_REDE";
 const char* PASSWORD = "SENHA_DA_SUA_REDE";
-const char* BROKER_MQTT = "broker.hivemq.com"; // Broker público e gratuito na nuvem
-const int BROKER_PORT = 1883; // Porta padrão mundial do MQTT (sem criptografia)
 
-// Objetos de Rede
-WiFiClient espClient;           // O Socket TCP base (que aprendemos agora pouco!)
-PubSubClient clienteMQTT(espClient); // O motor MQTT rodando em cima do TCP
+// URL de teste (HTTP puro, sem SSL para facilitar nossa base)
+const char* URL_SERVIDOR = "http://httpbin.org/get";
 
-// Protótipos das Tasks e Funções
-void TaskManterConexoes(void *pvParameters);
-void TaskPublicarSensor(void *pvParameters);
-void callbackRecebimentoMQTT(char* topico, byte* payload, unsigned int tamanho);
+// Protótipos das Tasks
+void TaskWiFi(void *pvParameters);
+void TaskRequisicaoHTTP(void *pvParameters);
 
 void setup() {
     Serial.begin(115200);
     vTaskDelay(pdMS_TO_TICKS(1000));
+    Serial.println("\n--- Iniciando Cliente HTTP ---");
 
-    // Configura o motor MQTT apontando para o servidor na nuvem
-    clienteMQTT.setServer(BROKER_MQTT, BROKER_PORT);
-    // Diz qual função deve ser chamada quando chegar uma mensagem para o ESP32
-    clienteMQTT.setCallback(callbackRecebimentoMQTT);
-
-    // Cria as Tasks no FreeRTOS
-    xTaskCreate(TaskManterConexoes, "WiFi_MQTT", 4096, NULL, 2, NULL);
-    xTaskCreate(TaskPublicarSensor, "Publicador", 3072, NULL, 1, NULL);
+    // Criação das Tasks no FreeRTOS
+    xTaskCreate(TaskWiFi,           "WiFi_Task", 4096, NULL, 1, NULL);
+    xTaskCreate(TaskRequisicaoHTTP, "HTTP_Task", 8192, NULL, 2, NULL); // HTTP exige mais memória RAM (Stack)
 }
 
 void loop() {
-    // Vazio.
+    // FreeRTOS no comando
 }
 
-// TASK 1: O Coração - Mantém o Wi-Fi e o Broker conectados
-void TaskManterConexoes(void *pvParameters) {
+// TASK 1: Garante que o Wi-Fi esteja sempre conectado
+void TaskWiFi(void *pvParameters) {
+    WiFi.begin(SSID, PASSWORD);
+    Serial.print("[Wi-Fi] Conectando");
+
     for(;;) {
-        // 1. Checa Wi-Fi
         if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("[Rede] Conectando ao Wi-Fi...");
-            WiFi.begin(SSID, PASSWORD);
-            while (WiFi.status() != WL_CONNECTED) { vTaskDelay(pdMS_TO_TICKS(500)); }
-            Serial.println("[Rede] Wi-Fi Conectado!");
+            Serial.print(".");
+            vTaskDelay(pdMS_TO_TICKS(500));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(5000)); // Checa a conexão a cada 5 segundos
         }
-
-        // 2. Checa MQTT
-        if (WiFi.status() == WL_CONNECTED && !clienteMQTT.connected()) {
-            Serial.println("[MQTT] Conectando ao Broker HiveMQ...");
-            // Cria um ID único para esse ESP32 não dar conflito na nuvem
-            String idCliente = "ESP32_Wilhan_" + String(random(0xffff), HEX);
-            
-            if (clienteMQTT.connect(idCliente.c_str())) {
-                Serial.println("[MQTT] Conectado ao Broker!");
-                // No instante que conecta, se INSCREVE no tópico de controle do LED
-                clienteMQTT.subscribe("wilhan/embarcados/led");
-                Serial.println("[MQTT] Inscrito no tópico: wilhan/embarcados/led");
-            } else {
-                Serial.printf("[MQTT] Falha ao conectar. Status: %d\n", clienteMQTT.state());
-            }
-        }
-
-        // 3. Função vital: Mantém os pings de conexão em background e escuta mensagens novas
-        if (clienteMQTT.connected()) {
-            clienteMQTT.loop();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(100)); // Roda a checagem 10 vezes por segundo
     }
 }
 
-// TASK 2: Simula a leitura de um sensor de temperatura industrial e publica
-void TaskPublicarSensor(void *pvParameters) {
-    int contadorTemperatura = 25;
-
+// TASK 2: Faz o "Bate e Volta" com o servidor web
+void TaskRequisicaoHTTP(void *pvParameters) {
     for(;;) {
-        if (clienteMQTT.connected()) {
-            // Prepara a mensagem como texto
-            char mensagem[10];
-            sprintf(mensagem, "%d", contadorTemperatura);
+        // Só tenta fazer a requisição se o Wi-Fi estiver conectado
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("\n[HTTP] Preparando requisição GET...");
 
-            // Publica o dado no tópico para o mundo (nuvem)
-            clienteMQTT.publish("wilhan/embarcados/sensor", mensagem);
-            Serial.printf("[TX] Publiquei temperatura: %d no tópico wilhan/embarcados/sensor\n", contadorTemperatura);
+            HTTPClient http;
+            WiFiClient clienteTCP; // O Socket TCP que aprendemos na primeira aula!
 
-            contadorTemperatura++;
-            if(contadorTemperatura > 40) contadorTemperatura = 25;
+            // 1. Abre a conexão TCP na porta 80 (padrão HTTP) com o servidor
+            http.begin(clienteTCP, URL_SERVIDOR);
+
+            // 2. Dispara o gatilho do pedido (Requisição GET)
+            int codigoStatus = http.GET();
+
+            // 3. Verifica o que o servidor respondeu
+            if (codigoStatus > 0) {
+                Serial.printf("[HTTP] Código de Status do Servidor: %d\n", codigoStatus);
+
+                // Se o código for 200 (OK), nós lemos o conteúdo que o servidor mandou
+                if (codigoStatus == HTTP_CODE_OK) {
+                    String respostaServidor = http.getString();
+                    Serial.println("[HTTP] Resposta recebida do servidor:");
+                    Serial.println(respostaServidor); // Vai printar um texto formatado em JSON
+                }
+            } else {
+                Serial.printf("[HTTP] Erro ao enviar requisição: %s\n", http.errorToString(codigoStatus).c_str());
+            }
+
+            // 4. Fecha a conexão e libera a memória RAM do ESP32
+            http.end();
+        } else {
+            Serial.println("[HTTP] Aguardando conexão Wi-Fi...");
         }
-        
-        // Espera 5 segundos para publicar novamente (economiza banda da IoT)
-        vTaskDelay(pdMS_TO_TICKS(5000));
-    }
-}
 
-// FUNÇÃO DE INTERRUPÇÃO (CALLBACK): Acordada quando o Broker envia algo para nós
-void callbackRecebimentoMQTT(char* topico, byte* payload, unsigned int tamanho) {
-    Serial.printf("\n[RX] Mensagem recebida do Broker no Tópico: %s\n", topico);
-    Serial.print("[RX] Comando: ");
-    
-    // Converte os bytes puros em um texto legível
-    String comando = "";
-    for (int i = 0; i < tamanho; i++) {
-        comando += (char)payload[i];
-    }
-    Serial.println(comando);
-
-    // Lógica para ligar um atuador
-    if (comando == "LIGAR") {
-        Serial.println(">> Ação: Ligando o Relé/LED de hardware!\n");
-    } else if (comando == "DESLIGAR") {
-        Serial.println(">> Ação: Desligando o Relé/LED de hardware!\n");
+        // Aguarda 10 segundos antes de fazer a próxima requisição
+        vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
